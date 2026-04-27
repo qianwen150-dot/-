@@ -37,7 +37,6 @@ jQuery(async () => {
     let stPresetNames = [];
 
     async function refreshSTData() {
-        // 读取角色
         try {
             const ctx = SillyTavern.getContext();
             if (ctx.characters) {
@@ -61,62 +60,56 @@ jQuery(async () => {
             console.warn('读取角色失败:', e);
         }
 
-        // 读取预设列表
         await loadPresetNames();
-
         renderCharSelect();
         renderCombos();
     }
 
-    // ========== 读取预设名称列表 ==========
+    // ========== 读取预设列表 ==========
     async function loadPresetNames() {
         stPresetNames = [];
 
-        // 方法1：从页面DOM读取
         try {
-            const selectors = [
-                '#settings_preset_openai',
-                '#settings_preset',
-                'select[name="preset"]'
-            ];
-            for (const sel of selectors) {
-                const selectEl = document.querySelector(sel);
-                if (selectEl && selectEl.options.length > 0) {
-                    for (const opt of selectEl.options) {
-                        if (opt.value && opt.value !== 'default') {
-                            stPresetNames.push(opt.value || opt.textContent);
-                        }
+            // 直接从酒馆页面的预设下拉框读取
+            const presetSelect = document.getElementById('settings_preset_openai');
+
+            if (presetSelect) {
+                for (const opt of presetSelect.options) {
+                    if (opt.value && opt.value.trim() !== '') {
+                        stPresetNames.push({
+                            value: opt.value,
+                            name: opt.textContent.trim()
+                        });
                     }
-                    if (stPresetNames.length > 0) break;
                 }
             }
-        } catch (e) {}
 
-        // 方法2：通过API获取
-        if (stPresetNames.length === 0) {
-            try {
-                const endpoints = [
-                    '/api/presets/openai',
-                    '/api/presets/textgenerationwebui',
-                    '/api/presets/novel',
-                    '/api/presets/instruct'
+            // 如果上面没找到，试其他选择器
+            if (stPresetNames.length === 0) {
+                const otherSelects = [
+                    '#settings_preset',
+                    '#context_preset'
                 ];
-                for (const ep of endpoints) {
-                    try {
-                        const resp = await fetch(ep);
-                        if (resp.ok) {
-                            const data = await resp.json();
-                            if (Array.isArray(data) && data.length > 0) {
-                                stPresetNames = stPresetNames.concat(data);
+                for (const selId of otherSelects) {
+                    const sel = document.querySelector(selId);
+                    if (sel) {
+                        for (const opt of sel.options) {
+                            if (opt.value && opt.value.trim() !== '') {
+                                stPresetNames.push({
+                                    value: opt.value,
+                                    name: opt.textContent.trim()
+                                });
                             }
                         }
-                    } catch (e2) {}
+                        if (stPresetNames.length > 0) break;
+                    }
                 }
-            } catch (e) {}
+            }
+
+        } catch (e) {
+            console.warn('读取预设列表失败:', e);
         }
 
-        // 去重
-        stPresetNames = [...new Set(stPresetNames)].sort();
         console.log('预设列表:', stPresetNames);
     }
 
@@ -238,7 +231,7 @@ jQuery(async () => {
         </div>
     `;
 
-    // ========== 自动填充 ==========
+    // ========== 自动填充API ==========
     try {
         if (typeof oai_settings !== 'undefined') {
             const urlEl = document.getElementById('ct-api-url');
@@ -326,10 +319,10 @@ jQuery(async () => {
                 modelOpts += `<option value="${combo.model}" selected>${combo.model}</option>`;
             }
 
-            // 预设选项
+            // 预设选项 - 直接从酒馆读取的预设名
             let presetOpts = '<option value="">(不使用预设 - 仅角色卡信息)</option>';
             stPresetNames.forEach(p => {
-                presetOpts += `<option value="${p}" ${p === combo.preset ? 'selected' : ''}>${p}</option>`;
+                presetOpts += `<option value="${p.value}" ${p.value === combo.preset ? 'selected' : ''}>${p.name}</option>`;
             });
             presetOpts += '<option value="__custom__">✏️ 自定义输入...</option>';
 
@@ -396,7 +389,6 @@ jQuery(async () => {
             box.appendChild(d);
         });
 
-        // 事件
         bindComboEvents(box);
     }
 
@@ -506,9 +498,10 @@ jQuery(async () => {
     async function buildSystemPrompt(combo) {
         let parts = [];
 
-        // 如果选了酒馆预设，尝试加载预设内容
+        // 如果选了酒馆预设，加载预设内容
         if (combo.preset && combo.preset !== '__custom__' && combo.preset !== '') {
             try {
+                // 尝试多个API路径
                 const endpoints = [
                     '/api/presets/openai/' + encodeURIComponent(combo.preset),
                     '/api/presets/textgenerationwebui/' + encodeURIComponent(combo.preset)
@@ -518,7 +511,6 @@ jQuery(async () => {
                         const resp = await fetch(ep);
                         if (resp.ok) {
                             const pData = await resp.json();
-                            // 提取主要的 system prompt 内容
                             const mainPrompt = pData.gaslight || pData.system_prompt || pData.main_prompt || '';
                             const jb = pData.jailbreak_prompt || pData.nsfw_prompt || '';
                             if (mainPrompt) parts.push(mainPrompt);
@@ -527,7 +519,9 @@ jQuery(async () => {
                         }
                     } catch (e2) {}
                 }
-            } catch (e) {}
+            } catch (e) {
+                console.warn('加载预设内容失败:', e);
+            }
         }
 
         // 自定义预设
@@ -631,7 +625,6 @@ jQuery(async () => {
             document.getElementById('ct-status').textContent = `${done}/${total}`;
         }
 
-        // 存储所有结果用于导出
         const allResults = [];
 
         for (const scenario of state.scenarios) {
@@ -650,7 +643,8 @@ jQuery(async () => {
             const grid = secDiv.querySelector('.ct-result-grid');
 
             combos.forEach(combo => {
-                const presetLabel = combo.preset === '__custom__' ? '自定义' : (combo.preset || '无预设');
+                const presetLabel = combo.preset === '__custom__' ? '自定义' :
+                    (combo.preset ? stPresetNames.find(p => p.value === combo.preset)?.name || combo.preset : '无预设');
                 const card = document.createElement('div');
                 card.className = 'ct-result-card';
                 card.id = `ct-r-${scenario.id}-${combo.id}`;
@@ -730,17 +724,16 @@ jQuery(async () => {
         document.getElementById('ct-status').textContent = '✅ 完成';
         document.getElementById('ct-progress').style.width = '100%';
 
-        // 导出按钮
         const exportBtn = document.getElementById('ct-export');
         exportBtn.style.display = '';
         exportBtn.onclick = () => {
-            let text = '=== 角色卡测试报告 ===\n\n';
+            let text = '=== 角色卡测试报告 ===\n日期: ' + new Date().toLocaleString() + '\n\n';
             allResults.forEach(r => {
                 text += `【场景】${r.scenario}\n【组合】${r.combo} | 模型: ${r.model} | 预设: ${r.preset}\n`;
                 r.replies.forEach(rp => {
-                    text += `👤 ${rp.user}\n🤖 ${rp.reply}\n`;
+                    text += `\n👤 ${rp.user}\n🤖 ${rp.reply}\n`;
                 });
-                text += '\n---\n\n';
+                text += '\n' + '='.repeat(50) + '\n\n';
             });
             const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
             const a = document.createElement('a');
