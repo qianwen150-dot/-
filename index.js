@@ -70,7 +70,6 @@ jQuery(async () => {
             }
         } catch (e) {}
 
-        // 加载预设内容
         for (let p of presets) {
             try {
                 const r = await fetch('/api/presets/openai/' + encodeURIComponent(p.value));
@@ -82,12 +81,8 @@ jQuery(async () => {
             } catch (e) {}
         }
 
-        // 打印预设内容方便调试
         presets.forEach(p => {
-            if (p.data) {
-                console.log('预设[' + p.name + ']字段:', Object.keys(p.data));
-                if (p.data.prompts) console.log('  prompts数量:', p.data.prompts.length);
-            }
+            if (p.data) console.log('预设[' + p.name + ']:', Object.keys(p.data), p.data.prompts ? 'prompts:' + p.data.prompts.length : '');
         });
 
         models = [];
@@ -105,15 +100,12 @@ jQuery(async () => {
         } catch (e) {}
 
         try {
-            if (typeof oai_settings !== 'undefined') {
-                apiUrl = oai_settings.reverse_proxy || oai_settings.custom_url || '';
-            }
+            if (typeof oai_settings !== 'undefined') apiUrl = oai_settings.reverse_proxy || oai_settings.custom_url || '';
         } catch (e) {}
 
         renderAll();
     }
 
-    // ===== 构建messages =====
     function buildMessages(combo, userMessages) {
         const msgs = [];
         const charIdx = parseInt(document.getElementById('ct-char').value);
@@ -125,12 +117,9 @@ jQuery(async () => {
         let jailbreak = '';
 
         if (pData) {
-            // 新版格式：prompts数组
             if (pData.prompts && Array.isArray(pData.prompts)) {
-                // 按顺序处理每个prompt
                 let promptOrder = [];
                 if (pData.prompt_order) {
-                    // prompt_order定义了顺序
                     const orderList = Array.isArray(pData.prompt_order) ? pData.prompt_order :
                         (pData.prompt_order[0]?.order || pData.prompt_order.order || []);
                     if (Array.isArray(orderList)) {
@@ -141,24 +130,13 @@ jQuery(async () => {
                         });
                     }
                 }
-
-                // 如果没有order就按原顺序
-                if (promptOrder.length === 0) {
-                    promptOrder = pData.prompts.map(p => p.identifier || p.name);
-                }
+                if (promptOrder.length === 0) promptOrder = pData.prompts.map(p => p.identifier || p.name);
 
                 promptOrder.forEach(id => {
                     const prompt = pData.prompts.find(p => (p.identifier || p.name) === id);
                     if (!prompt || prompt.enabled === false || !prompt.content) return;
+                    let content = char ? replaceMacros(prompt.content, char) : prompt.content;
 
-                    let content = prompt.content;
-
-                    // 替换宏
-                    if (char) {
-                        content = replaceMacros(content, char);
-                    }
-
-                    // 根据标识判断放在哪里
                     if (prompt.identifier === 'jailbreak' || prompt.name === 'jailbreak') {
                         jailbreak = content;
                     } else if (prompt.identifier === 'charDescription' || prompt.identifier === 'char_description') {
@@ -169,72 +147,40 @@ jQuery(async () => {
                         if (char && char.scenario) sysParts.push(char.scenario);
                     } else if (prompt.identifier === 'dialogueExamples' || prompt.identifier === 'mes_example') {
                         if (char && char.mes_example) sysParts.push(char.mes_example);
-                    } else if (prompt.identifier === 'worldInfoBefore' || prompt.identifier === 'worldInfoAfter') {
-                        // 跳过世界书（独立API调用无法获取）
-                    } else if (prompt.identifier === 'personaDescription') {
-                        // 跳过用户persona
+                    } else if (prompt.identifier === 'worldInfoBefore' || prompt.identifier === 'worldInfoAfter' || prompt.identifier === 'personaDescription') {
+                        // skip
                     } else {
-                        // 其他提示词直接加入
                         sysParts.push(content);
                     }
                 });
             }
 
-            // 旧版格式
             if (sysParts.length === 0) {
                 const main = pData.gaslight || pData.system_prompt || pData.main_prompt || '';
-                if (main) {
-                    let content = main;
-                    if (char) content = replaceMacros(content, char);
-                    sysParts.push(content);
-                }
+                if (main) sysParts.push(char ? replaceMacros(main, char) : main);
                 jailbreak = pData.jailbreak_prompt || pData.nsfw_prompt || '';
                 if (jailbreak && char) jailbreak = replaceMacros(jailbreak, char);
             }
         }
 
-        // 如果预设里没有插入角色信息，手动加
         if (char) {
             const joined = sysParts.join('\n');
             if (char.sys) sysParts.unshift(char.sys);
-            if (char.desc && !joined.includes(char.desc.substring(0, 50))) {
-                sysParts.push('[Character Description]\n' + char.desc);
-            }
-            if (char.personality && !joined.includes(char.personality.substring(0, 30))) {
-                sysParts.push('[Character Personality]\n' + char.personality);
-            }
-            if (char.scenario && !joined.includes(char.scenario.substring(0, 30))) {
-                sysParts.push('[Scenario]\n' + char.scenario);
-            }
-            if (char.mes_example && !joined.includes(char.mes_example.substring(0, 30))) {
-                sysParts.push('[Example Messages]\n' + char.mes_example);
-            }
+            if (char.desc && !joined.includes(char.desc.substring(0, 50))) sysParts.push('[Character Description]\n' + char.desc);
+            if (char.personality && !joined.includes(char.personality.substring(0, 30))) sysParts.push('[Character Personality]\n' + char.personality);
+            if (char.scenario && !joined.includes(char.scenario.substring(0, 30))) sysParts.push('[Scenario]\n' + char.scenario);
+            if (char.mes_example && !joined.includes(char.mes_example.substring(0, 30))) sysParts.push('[Example Messages]\n' + char.mes_example);
         }
 
-        // system消息
-        if (sysParts.length > 0) {
-            msgs.push({ role: 'system', content: sysParts.join('\n\n') });
-        }
+        if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\n\n') });
 
-        // 开场白
         const greeting = getGreetingContent(combo);
-        if (greeting) {
-            let g = char ? replaceMacros(greeting, char) : greeting;
-            msgs.push({ role: 'assistant', content: g });
-        }
+        if (greeting) msgs.push({ role: 'assistant', content: char ? replaceMacros(greeting, char) : greeting });
 
-        // 用户消息（只放第一条，后续多轮在外部处理）
         userMessages.forEach(m => msgs.push({ role: 'user', content: m }));
 
-        // post_history_instructions
-        if (char && char.post) {
-            msgs.push({ role: 'system', content: replaceMacros(char.post, char) });
-        }
-
-        // jailbreak放最后
-        if (jailbreak) {
-            msgs.push({ role: 'system', content: jailbreak });
-        }
+        if (char && char.post) msgs.push({ role: 'system', content: replaceMacros(char.post, char) });
+        if (jailbreak) msgs.push({ role: 'system', content: jailbreak });
 
         return msgs;
     }
@@ -280,58 +226,101 @@ jQuery(async () => {
         return g ? g.content : (gs[0]?.content || '');
     }
 
-    // ===== API =====
+    // ===== API调用 - 支持思考链 =====
     async function callAPI(model, messages, pData) {
         const url = document.getElementById('ct-url').value.trim();
         const key = document.getElementById('ct-key').value.trim();
         if (!url || !key) throw new Error('填写API地址和Key');
 
-        // 从预设读参数，给大默认值
-        let temp = 0.8, maxTk = 4096, topP = 1, freqPen = 0, presPen = 0;
+        let temp = 0.8, maxTk = 16384, topP = 1, freqPen = 0, presPen = 0;
         if (pData) {
             temp = pData.temp_openai ?? pData.temperature ?? pData.temp ?? temp;
-            // max_tokens: 尝试所有可能的字段名
-            const possibleMax = pData.openai_max_tokens ?? pData.max_tokens ?? pData.max_length
-                ?? pData.openai_max_context ?? pData.rep_pen_range ?? null;
-            if (possibleMax && possibleMax > 0 && possibleMax <= 32000) {
-                maxTk = possibleMax;
-            }
+            const pm = pData.openai_max_tokens ?? pData.max_tokens ?? pData.max_length ?? null;
+            if (pm && pm >= 1000 && pm <= 128000) maxTk = pm;
             topP = pData.top_p_openai ?? pData.top_p ?? topP;
             freqPen = pData.freq_pen_openai ?? pData.frequency_penalty ?? freqPen;
             presPen = pData.pres_pen_openai ?? pData.presence_penalty ?? presPen;
         }
-
-        // 保底：至少4096
-        if (maxTk < 1000) maxTk = 4096;
+        if (maxTk < 8192) maxTk = 16384;
 
         let endpoint = url.replace(/\/+$/, '');
         if (!endpoint.includes('/chat/completions')) {
             endpoint += endpoint.endsWith('/v1') ? '/chat/completions' : '/v1/chat/completions';
         }
 
-        console.log('API请求:', model, '温度:', temp, 'max_tokens:', maxTk, '消息数:', messages.length);
+        // 判断是否是支持思考的模型
+        const isThinkingModel = /claude-3[.-]?[57]|claude-4|deepseek|o[1-9]|o3|o4|gemini.*think|gemini.*pro|qwen3|qwq/i.test(model);
+
+        const reqBody = {
+            model, messages,
+            max_tokens: maxTk,
+            temperature: temp,
+            top_p: topP,
+            frequency_penalty: freqPen,
+            presence_penalty: presPen
+        };
+
+        // 部分API需要额外参数来启用思考
+        if (isThinkingModel) {
+            // Claude的extended thinking
+            if (/claude/i.test(model)) {
+                reqBody.thinking = { type: 'enabled', budget_tokens: Math.min(maxTk, 8192) };
+            }
+            // 部分中转站用这个参数
+            if (/deepseek/i.test(model)) {
+                reqBody.enable_thinking = true;
+            }
+        }
 
         const resp = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
-            body: JSON.stringify({
-                model, messages,
-                max_tokens: maxTk,
-                temperature: temp,
-                top_p: topP,
-                frequency_penalty: freqPen,
-                presence_penalty: presPen
-            })
+            body: JSON.stringify(reqBody)
         });
 
         if (!resp.ok) {
             const err = await resp.text();
             throw new Error(`(${resp.status}) ${err.substring(0, 150)}`);
         }
+
         const data = await resp.json();
-        if (data.choices?.[0]) return data.choices[0].message.content;
-        if (data.content?.[0]) return data.content[0].text;
-        throw new Error('无法解析');
+
+        // 解析回复 + 思考链
+        let content = '';
+        let thinking = '';
+
+        if (data.choices?.[0]) {
+            const msg = data.choices[0].message;
+            content = msg.content || '';
+
+            // 思考链可能在不同字段
+            thinking = msg.reasoning_content || msg.reasoning || msg.thinking || '';
+
+            // 有些模型把思考放在content里用<think>标签
+            if (!thinking && content.includes('<think>')) {
+                const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
+                if (thinkMatch) {
+                    thinking = thinkMatch[1].trim();
+                    content = content.replace(/<think>[\s\S]*?<\/think>/, '').trim();
+                }
+            }
+            // 也可能是<thinking>标签
+            if (!thinking && content.includes('<thinking>')) {
+                const thinkMatch = content.match(/<thinking>([\s\S]*?)<\/thinking>/);
+                if (thinkMatch) {
+                    thinking = thinkMatch[1].trim();
+                    content = content.replace(/<thinking>[\s\S]*?<\/thinking>/, '').trim();
+                }
+            }
+        } else if (data.content && Array.isArray(data.content)) {
+            // Claude格式
+            data.content.forEach(block => {
+                if (block.type === 'thinking') thinking += (block.thinking || block.text || '') + '\n';
+                else if (block.type === 'text') content += block.text || '';
+            });
+        }
+
+        return { content: content.trim(), thinking: thinking.trim() };
     }
 
     async function fetchModels() {
@@ -354,7 +343,6 @@ jQuery(async () => {
         } catch (e) { return false; }
     }
 
-    // ===== 渲染 =====
     function renderAll() {
         const cs = document.getElementById('ct-char');
         cs.innerHTML = '<option value="-1">-- 选择角色 --</option>';
@@ -443,7 +431,25 @@ jQuery(async () => {
         };
     }
 
-    // ===== 主界面 =====
+    // ===== 格式化回复（含思考链） =====
+    function formatReply(result) {
+        let html = '';
+
+        if (result.thinking) {
+            html += `<details style="margin-bottom:8px;border:1px solid #333;border-radius:6px;overflow:hidden;">
+                <summary style="padding:6px 10px;background:#1a1a3e;cursor:pointer;font-size:11px;color:#9980fa;">💭 思考过程（点击展开）</summary>
+                <div style="padding:8px 10px;font-size:11px;color:#888;background:#12122a;white-space:pre-wrap;max-height:300px;overflow-y:auto;line-height:1.6;">${escapeHtml(result.thinking)}</div>
+            </details>`;
+        }
+
+        html += `<div style="white-space:pre-wrap;line-height:1.7;">${escapeHtml(result.content)}</div>`;
+        return html;
+    }
+
+    function escapeHtml(text) {
+        return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
     mainEl.innerHTML = `
         <div class="ct-topbar"><h1>🧪 角色卡测试台</h1><div class="ct-topbar-right"><span class="ct-status" id="ct-st">就绪</span><button class="ct-close-btn" id="ct-x">✕</button></div></div>
         <div class="ct-body">
@@ -487,7 +493,7 @@ jQuery(async () => {
         renderCombos();
     };
 
-    // ===== 开始测试 - 全部并行 =====
+    // ===== 开始测试 =====
     document.getElementById('ct-go').onclick = async () => {
         if (state.testing) return;
         if (!document.getElementById('ct-url').value.trim() || !document.getElementById('ct-key').value.trim()) { alert('填写API'); return; }
@@ -501,11 +507,9 @@ jQuery(async () => {
         res.innerHTML = '';
         document.getElementById('ct-exp').style.display = 'none';
 
-        // 收集所有任务
         const allTasks = [];
         const allResults = [];
 
-        // 先创建所有UI卡片
         for (const scenario of state.scenarios) {
             const combos = state.combos.filter(c => c.sids.includes(scenario.id));
             if (!combos.length) continue;
@@ -524,15 +528,12 @@ jQuery(async () => {
                 card.id = `ct-r${scenario.id}-${co.id}`;
                 card.innerHTML = `<div class="ct-result-card-header">组合${co.id} | ${mN} | ${pN}</div><div class="ct-result-card-body"><span class="ct-loading">⏳ 请求中...</span></div><div class="ct-result-card-footer">${[1,2,3,4,5].map(i => `<button class="ct-star" data-s="${i}">⭐</button>`).join('')}<span style="margin-left:auto;font-size:11px;color:#666;" class="ct-rt"></span></div>`;
                 grid.appendChild(card);
-
-                // 创建任务
                 allTasks.push({ scenario, combo: co, cardId: `ct-r${scenario.id}-${co.id}` });
             });
         }
 
         let total = allTasks.length, done = 0;
 
-        // 全部同时发送！
         const promises = allTasks.map(async (task) => {
             const { scenario, combo, cardId } = task;
             const card = document.getElementById(cardId);
@@ -544,26 +545,24 @@ jQuery(async () => {
                 const pData = presets.find(p => p.value === combo.preset)?.data || null;
                 const model = combo.model || models[0]?.value || 'gpt-4o';
 
-                // 第一轮
                 const initMsgs = buildMessages(combo, [scenario.messages[0]]);
-                let reply = await callAPI(model, initMsgs, pData);
-                let replies = [{ user: scenario.messages[0], reply }];
+                let result = await callAPI(model, initMsgs, pData);
+                let replies = [{ user: scenario.messages[0], ...result }];
 
-                // 多轮
                 if (scenario.messages.length > 1) {
-                    let conv = [...initMsgs, { role: 'assistant', content: reply }];
+                    let conv = [...initMsgs, { role: 'assistant', content: result.content }];
                     for (let i = 1; i < scenario.messages.length; i++) {
                         conv.push({ role: 'user', content: scenario.messages[i] });
-                        reply = await callAPI(model, conv, pData);
-                        conv.push({ role: 'assistant', content: reply });
-                        replies.push({ user: scenario.messages[i], reply });
+                        result = await callAPI(model, conv, pData);
+                        conv.push({ role: 'assistant', content: result.content });
+                        replies.push({ user: scenario.messages[i], ...result });
                     }
                 }
 
                 let html = '';
                 replies.forEach(r => {
-                    if (scenario.messages.length > 1) html += `<div style="color:#667eea;font-size:11px;">👤 ${r.user}</div>`;
-                    html += `<div style="margin-bottom:6px;">${r.reply}</div>`;
+                    if (scenario.messages.length > 1) html += `<div style="color:#667eea;font-size:11px;">👤 ${escapeHtml(r.user)}</div>`;
+                    html += formatReply(r);
                 });
                 body.innerHTML = html;
                 timeEl.textContent = ((Date.now() - t0) / 1000).toFixed(1) + 's';
@@ -596,7 +595,11 @@ jQuery(async () => {
             let t = '=== 测试报告 ===\n' + new Date().toLocaleString() + '\n\n';
             allResults.forEach(r => {
                 t += `[${r.scenario}] 组合${r.combo} | ${r.model} | ${r.preset}\n`;
-                r.replies.forEach(rp => { t += `👤 ${rp.user}\n🤖 ${rp.reply}\n\n`; });
+                r.replies.forEach(rp => {
+                    t += `👤 ${rp.user}\n`;
+                    if (rp.thinking) t += `💭 思考: ${rp.thinking}\n`;
+                    t += `🤖 ${rp.content}\n\n`;
+                });
                 t += '---\n\n';
             });
             const a = document.createElement('a');
