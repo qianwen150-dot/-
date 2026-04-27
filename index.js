@@ -27,9 +27,12 @@ jQuery(async () => {
 
     let characters = [];
     let currentCharId = -1;
-    let presets = [];
+    let presetOptions = []; // {value, name}
     let models = [];
     let apiUrl = '';
+
+    // 缓存每个预设的完整数据
+    let presetDataCache = {};
 
     const state = {
         scenarios: [
@@ -41,9 +44,12 @@ jQuery(async () => {
         nextSid: 4, nextCid: 1, testing: false
     };
 
+    // ===== 读取酒馆数据 =====
     async function refreshAll() {
+        const ctx = SillyTavern.getContext();
+
+        // 角色
         try {
-            const ctx = SillyTavern.getContext();
             if (ctx.characters) {
                 characters = ctx.characters.map((c, i) => ({
                     idx: i, name: c.name || '?',
@@ -60,127 +66,208 @@ jQuery(async () => {
             if (ctx.characterId !== undefined) currentCharId = ctx.characterId;
         } catch (e) {}
 
-        presets = [];
-        try {
-            const sel = document.getElementById('settings_preset_openai') || document.getElementById('settings_preset');
-            if (sel) {
-                for (const o of sel.options) {
-                    if (o.value && o.value.trim()) presets.push({ value: o.value, name: o.textContent.trim(), data: null });
+        // 预设列表 - 从下拉框读
+        presetOptions = [];
+        const presetSel = document.getElementById('settings_preset_openai');
+        if (presetSel) {
+            for (const o of presetSel.options) {
+                if (o.value && o.value.trim()) {
+                    presetOptions.push({ value: o.value, name: o.textContent.trim() });
                 }
             }
-        } catch (e) {}
-
-        for (let p of presets) {
-            try {
-                const r = await fetch('/api/presets/openai/' + encodeURIComponent(p.value));
-                if (r.ok) { p.data = await r.json(); continue; }
-            } catch (e) {}
-            try {
-                const r = await fetch('/api/presets/textgenerationwebui/' + encodeURIComponent(p.value));
-                if (r.ok) p.data = await r.json();
-            } catch (e) {}
         }
 
-        presets.forEach(p => {
-            if (p.data) console.log('预设[' + p.name + ']:', Object.keys(p.data), p.data.prompts ? 'prompts:' + p.data.prompts.length : '');
-        });
+        // 缓存当前预设数据
+        const currentPresetValue = presetSel?.value;
+        if (currentPresetValue && ctx.chatCompletionSettings) {
+            presetDataCache[currentPresetValue] = JSON.parse(JSON.stringify(ctx.chatCompletionSettings));
+            console.log('缓存当前预设:', currentPresetValue, '提示词数:', ctx.chatCompletionSettings.prompts?.length);
+        }
 
+        // 模型 - 从下拉框读
         models = [];
-        try {
-            const sels = ['#model_openai_select', '#model_select'];
-            for (const s of sels) {
-                const sel = document.querySelector(s);
-                if (sel && sel.options.length > 1) {
-                    for (const o of sel.options) {
-                        if (o.value && o.value.trim()) models.push({ value: o.value, name: o.textContent.trim() });
-                    }
-                    break;
+        const modelSelectors = ['#model_openai_select', '#model_select'];
+        for (const s of modelSelectors) {
+            const sel = document.querySelector(s);
+            if (sel && sel.options.length > 1) {
+                for (const o of sel.options) {
+                    if (o.value && o.value.trim()) models.push({ value: o.value, name: o.textContent.trim() });
                 }
+                break;
             }
-        } catch (e) {}
+        }
 
+        // API地址
         try {
-            if (typeof oai_settings !== 'undefined') apiUrl = oai_settings.reverse_proxy || oai_settings.custom_url || '';
+            const s = ctx.chatCompletionSettings;
+            if (s) apiUrl = s.reverse_proxy || s.custom_url || '';
         } catch (e) {}
 
         renderAll();
     }
 
-    function buildMessages(combo, userMessages) {
+    // ===== 加载指定预设的数据 =====
+    async function loadPresetData(presetValue) {
+        // 如果已缓存直接返回
+        if (presetDataCache[presetValue]) return presetDataCache[presetValue];
+
+        // 否则切换预设来加载
+        const presetSel = document.getElementById('settings_preset_openai');
+        if (!presetSel) return null;
+
+        const originalValue = presetSel.value;
+
+        // 切换到目标预设
+        presetSel.value = presetValue;
+        presetSel.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 800));
+
+        // 读取数据
+        const ctx = SillyTavern.getContext();
+        if (ctx.chatCompletionSettings) {
+            presetDataCache[presetValue] = JSON.parse(JSON.stringify(ctx.chatCompletionSettings));
+            console.log('加载预设:', presetValue, '提示词数:', ctx.chatCompletionSettings.prompts?.length);
+        }
+
+        // 切回原来的预设
+        presetSel.value = originalValue;
+        presetSel.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 500));
+
+        return presetDataCache[presetValue] || null;
+    }
+
+    // ===== 构建messages =====
+    function buildMessages(presetData, combo) {
         const msgs = [];
         const charIdx = parseInt(document.getElementById('ct-char').value);
         const char = characters.find(c => c.idx === charIdx);
-        const preset = presets.find(p => p.value === combo.preset);
-        const pData = preset?.data;
 
-        let sysParts = [];
-        let jailbreak = '';
+        if (!presetData || !presetData.prompts) {
+            // 没有预设数据就用角色卡基本信息
+            if (char) {
+                let sys = '';
+                if (char.sys) sys += char.sys + '\n\n';
+                if (char.desc) sys += char.desc + '\n\n';
+                if (char.personality) sys += char.personality + '\n\n';
+                if (char.scenario) sys += char.scenario + '\n\n';
+                if (sys) msgs.push({ role: 'system', content: sys.trim() });
+            }
+            return msgs;
+        }
 
-        if (pData) {
-            if (pData.prompts && Array.isArray(pData.prompts)) {
-                let promptOrder = [];
-                if (pData.prompt_order) {
-                    const orderList = Array.isArray(pData.prompt_order) ? pData.prompt_order :
-                        (pData.prompt_order[0]?.order || pData.prompt_order.order || []);
-                    if (Array.isArray(orderList)) {
-                        orderList.forEach(item => {
-                            const id = item.identifier || item;
-                            const enabled = item.enabled !== false;
-                            if (enabled) promptOrder.push(id);
-                        });
+        // 读取prompt_order
+        let order = [];
+        if (presetData.prompt_order) {
+            // prompt_order格式: [{"character_id":100000,"order":[{identifier,enabled},...]}]
+            const orderArr = Array.isArray(presetData.prompt_order) ? presetData.prompt_order : [presetData.prompt_order];
+            // 找character_id=100000的通用顺序，或第一个
+            const orderObj = orderArr.find(o => o.character_id === 100000) || orderArr[0];
+            if (orderObj && orderObj.order) {
+                order = orderObj.order;
+            }
+        }
+
+        // 如果没有order就按prompts原顺序
+        if (!order.length) {
+            order = presetData.prompts.map(p => ({ identifier: p.identifier, enabled: p.enabled !== false }));
+        }
+
+        // 按顺序组装
+        let systemParts = [];
+        let jailbreakContent = '';
+
+        order.forEach(item => {
+            if (item.enabled === false) return;
+
+            const prompt = presetData.prompts.find(p => p.identifier === item.identifier);
+            if (!prompt) return;
+            // enabled:undefined 视为启用, enabled:false 视为禁用
+            if (prompt.enabled === false) return;
+            if (!prompt.content && !['charDescription', 'charPersonality', 'scenario', 'dialogueExamples', 'chatHistory', 'worldInfoBefore', 'worldInfoAfter', 'personaDescription'].includes(prompt.identifier)) return;
+
+            const id = prompt.identifier;
+            let content = prompt.content || '';
+
+            // 替换宏
+            if (char) content = replaceMacros(content, char);
+
+            // 根据标识分类处理
+            if (id === 'jailbreak') {
+                jailbreakContent = content;
+            } else if (id === 'charDescription') {
+                if (char && char.desc) systemParts.push(char.desc);
+            } else if (id === 'charPersonality') {
+                if (char && char.personality) systemParts.push(char.personality);
+            } else if (id === 'scenario') {
+                if (char && char.scenario) systemParts.push(char.scenario);
+            } else if (id === 'dialogueExamples') {
+                if (char && char.mes_example) systemParts.push(char.mes_example);
+            } else if (id === 'chatHistory') {
+                // 跳过，我们自己管理对话历史
+            } else if (id === 'worldInfoBefore' || id === 'worldInfoAfter') {
+                // 跳过世界书
+            } else if (id === 'personaDescription') {
+                // 跳过用户persona
+            } else {
+                // 其他提示词按角色加入
+                if (prompt.role === 'system') {
+                    systemParts.push(content);
+                } else if (prompt.role === 'assistant') {
+                    // assistant角色的提示词单独作为assistant消息
+                    if (msgs.length === 0 || msgs[msgs.length - 1].role !== 'system') {
+                        // 先把前面积累的system内容推入
+                        if (systemParts.length > 0) {
+                            msgs.push({ role: 'system', content: systemParts.join('\n\n') });
+                            systemParts = [];
+                        }
+                    } else if (systemParts.length > 0) {
+                        msgs.push({ role: 'system', content: systemParts.join('\n\n') });
+                        systemParts = [];
                     }
+                    msgs.push({ role: 'assistant', content: content });
+                } else if (prompt.role === 'user') {
+                    if (systemParts.length > 0) {
+                        msgs.push({ role: 'system', content: systemParts.join('\n\n') });
+                        systemParts = [];
+                    }
+                    msgs.push({ role: 'user', content: content });
+                } else {
+                    // 未知角色当system
+                    systemParts.push(content);
                 }
-                if (promptOrder.length === 0) promptOrder = pData.prompts.map(p => p.identifier || p.name);
-
-                promptOrder.forEach(id => {
-                    const prompt = pData.prompts.find(p => (p.identifier || p.name) === id);
-                    if (!prompt || prompt.enabled === false || !prompt.content) return;
-                    let content = char ? replaceMacros(prompt.content, char) : prompt.content;
-
-                    if (prompt.identifier === 'jailbreak' || prompt.name === 'jailbreak') {
-                        jailbreak = content;
-                    } else if (prompt.identifier === 'charDescription' || prompt.identifier === 'char_description') {
-                        if (char && char.desc) sysParts.push(char.desc);
-                    } else if (prompt.identifier === 'charPersonality' || prompt.identifier === 'char_personality') {
-                        if (char && char.personality) sysParts.push(char.personality);
-                    } else if (prompt.identifier === 'scenario') {
-                        if (char && char.scenario) sysParts.push(char.scenario);
-                    } else if (prompt.identifier === 'dialogueExamples' || prompt.identifier === 'mes_example') {
-                        if (char && char.mes_example) sysParts.push(char.mes_example);
-                    } else if (prompt.identifier === 'worldInfoBefore' || prompt.identifier === 'worldInfoAfter' || prompt.identifier === 'personaDescription') {
-                        // skip
-                    } else {
-                        sysParts.push(content);
-                    }
-                });
             }
+        });
 
-            if (sysParts.length === 0) {
-                const main = pData.gaslight || pData.system_prompt || pData.main_prompt || '';
-                if (main) sysParts.push(char ? replaceMacros(main, char) : main);
-                jailbreak = pData.jailbreak_prompt || pData.nsfw_prompt || '';
-                if (jailbreak && char) jailbreak = replaceMacros(jailbreak, char);
+        // 剩余的system部分
+        if (systemParts.length > 0) {
+            msgs.push({ role: 'system', content: systemParts.join('\n\n') });
+        }
+
+        // 角色卡的system_prompt如果没被预设包含
+        if (char && char.sys) {
+            const allContent = msgs.map(m => m.content).join('\n');
+            if (!allContent.includes(char.sys.substring(0, 50))) {
+                msgs.unshift({ role: 'system', content: char.sys });
             }
         }
 
-        if (char) {
-            const joined = sysParts.join('\n');
-            if (char.sys) sysParts.unshift(char.sys);
-            if (char.desc && !joined.includes(char.desc.substring(0, 50))) sysParts.push('[Character Description]\n' + char.desc);
-            if (char.personality && !joined.includes(char.personality.substring(0, 30))) sysParts.push('[Character Personality]\n' + char.personality);
-            if (char.scenario && !joined.includes(char.scenario.substring(0, 30))) sysParts.push('[Scenario]\n' + char.scenario);
-            if (char.mes_example && !joined.includes(char.mes_example.substring(0, 30))) sysParts.push('[Example Messages]\n' + char.mes_example);
-        }
-
-        if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\n\n') });
-
+        // 开场白
         const greeting = getGreetingContent(combo);
-        if (greeting) msgs.push({ role: 'assistant', content: char ? replaceMacros(greeting, char) : greeting });
+        if (greeting) {
+            let g = char ? replaceMacros(greeting, char) : greeting;
+            msgs.push({ role: 'assistant', content: g });
+        }
 
-        userMessages.forEach(m => msgs.push({ role: 'user', content: m }));
+        // post_history_instructions
+        if (char && char.post) {
+            msgs.push({ role: 'system', content: replaceMacros(char.post, char) });
+        }
 
-        if (char && char.post) msgs.push({ role: 'system', content: replaceMacros(char.post, char) });
-        if (jailbreak) msgs.push({ role: 'system', content: jailbreak });
+        // jailbreak放最后
+        if (jailbreakContent) {
+            msgs.push({ role: 'system', content: jailbreakContent });
+        }
 
         return msgs;
     }
@@ -226,29 +313,27 @@ jQuery(async () => {
         return g ? g.content : (gs[0]?.content || '');
     }
 
-    // ===== API调用 - 支持思考链 =====
-    async function callAPI(model, messages, pData) {
+    // ===== API调用 =====
+    async function callAPI(model, messages, presetData) {
         const url = document.getElementById('ct-url').value.trim();
         const key = document.getElementById('ct-key').value.trim();
         if (!url || !key) throw new Error('填写API地址和Key');
 
-        let temp = 0.8, maxTk = 16384, topP = 1, freqPen = 0, presPen = 0;
-        if (pData) {
-            temp = pData.temp_openai ?? pData.temperature ?? pData.temp ?? temp;
-            const pm = pData.openai_max_tokens ?? pData.max_tokens ?? pData.max_length ?? null;
-            if (pm && pm >= 1000 && pm <= 128000) maxTk = pm;
-            topP = pData.top_p_openai ?? pData.top_p ?? topP;
-            freqPen = pData.freq_pen_openai ?? pData.frequency_penalty ?? freqPen;
-            presPen = pData.pres_pen_openai ?? pData.presence_penalty ?? presPen;
+        // 从预设读参数
+        let temp = 0.8, maxTk = 30000, topP = 1, freqPen = 0, presPen = 0;
+        if (presetData) {
+            if (presetData.temp_openai !== undefined) temp = presetData.temp_openai;
+            if (presetData.openai_max_tokens !== undefined && presetData.openai_max_tokens > 0) maxTk = presetData.openai_max_tokens;
+            if (presetData.top_p_openai !== undefined) topP = presetData.top_p_openai;
+            if (presetData.freq_pen_openai !== undefined) freqPen = presetData.freq_pen_openai;
+            if (presetData.pres_pen_openai !== undefined) presPen = presetData.pres_pen_openai;
         }
-        if (maxTk < 8192) maxTk = 16384;
 
         let endpoint = url.replace(/\/+$/, '');
         if (!endpoint.includes('/chat/completions')) {
             endpoint += endpoint.endsWith('/v1') ? '/chat/completions' : '/v1/chat/completions';
         }
 
-        // 判断是否是支持思考的模型
         const isThinkingModel = /claude-3[.-]?[57]|claude-4|deepseek|o[1-9]|o3|o4|gemini.*think|gemini.*pro|qwen3|qwq/i.test(model);
 
         const reqBody = {
@@ -260,17 +345,13 @@ jQuery(async () => {
             presence_penalty: presPen
         };
 
-        // 部分API需要额外参数来启用思考
         if (isThinkingModel) {
-            // Claude的extended thinking
-            if (/claude/i.test(model)) {
-                reqBody.thinking = { type: 'enabled', budget_tokens: Math.min(maxTk, 8192) };
-            }
-            // 部分中转站用这个参数
-            if (/deepseek/i.test(model)) {
-                reqBody.enable_thinking = true;
-            }
+            if (/claude/i.test(model)) reqBody.thinking = { type: 'enabled', budget_tokens: Math.min(maxTk, 10000) };
+            if (/deepseek/i.test(model)) reqBody.enable_thinking = true;
         }
+
+        console.log('API请求:', model, 'temp:', temp, 'max_tokens:', maxTk, 'messages:', messages.length,
+            'system内容长度:', messages.filter(m => m.role === 'system').reduce((a, m) => a + m.content.length, 0));
 
         const resp = await fetch(endpoint, {
             method: 'POST',
@@ -284,36 +365,22 @@ jQuery(async () => {
         }
 
         const data = await resp.json();
-
-        // 解析回复 + 思考链
-        let content = '';
-        let thinking = '';
+        let content = '', thinking = '';
 
         if (data.choices?.[0]) {
             const msg = data.choices[0].message;
             content = msg.content || '';
-
-            // 思考链可能在不同字段
             thinking = msg.reasoning_content || msg.reasoning || msg.thinking || '';
 
-            // 有些模型把思考放在content里用<think>标签
             if (!thinking && content.includes('<think>')) {
-                const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
-                if (thinkMatch) {
-                    thinking = thinkMatch[1].trim();
-                    content = content.replace(/<think>[\s\S]*?<\/think>/, '').trim();
-                }
+                const m = content.match(/<think>([\s\S]*?)<\/think>/);
+                if (m) { thinking = m[1].trim(); content = content.replace(/<think>[\s\S]*?<\/think>/, '').trim(); }
             }
-            // 也可能是<thinking>标签
             if (!thinking && content.includes('<thinking>')) {
-                const thinkMatch = content.match(/<thinking>([\s\S]*?)<\/thinking>/);
-                if (thinkMatch) {
-                    thinking = thinkMatch[1].trim();
-                    content = content.replace(/<thinking>[\s\S]*?<\/thinking>/, '').trim();
-                }
+                const m = content.match(/<thinking>([\s\S]*?)<\/thinking>/);
+                if (m) { thinking = m[1].trim(); content = content.replace(/<thinking>[\s\S]*?<\/thinking>/, '').trim(); }
             }
         } else if (data.content && Array.isArray(data.content)) {
-            // Claude格式
             data.content.forEach(block => {
                 if (block.type === 'thinking') thinking += (block.thinking || block.text || '') + '\n';
                 else if (block.type === 'text') content += block.text || '';
@@ -343,6 +410,20 @@ jQuery(async () => {
         } catch (e) { return false; }
     }
 
+    function escapeHtml(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+    function formatReply(r) {
+        let h = '';
+        if (r.thinking) {
+            h += `<details style="margin-bottom:8px;border:1px solid #333;border-radius:6px;overflow:hidden;">
+                <summary style="padding:6px 10px;background:#1a1a3e;cursor:pointer;font-size:11px;color:#9980fa;">💭 思考过程</summary>
+                <div style="padding:8px 10px;font-size:11px;color:#888;background:#12122a;white-space:pre-wrap;max-height:300px;overflow-y:auto;">${escapeHtml(r.thinking)}</div></details>`;
+        }
+        h += `<div style="white-space:pre-wrap;line-height:1.7;">${escapeHtml(r.content)}</div>`;
+        return h;
+    }
+
+    // ===== 渲染 =====
     function renderAll() {
         const cs = document.getElementById('ct-char');
         cs.innerHTML = '<option value="-1">-- 选择角色 --</option>';
@@ -393,8 +474,8 @@ jQuery(async () => {
             d.className = 'ct-combo';
             let mO = '<option value="">(当前)</option>';
             models.forEach(m => { mO += `<option value="${m.value}" ${m.value === c.model ? 'selected' : ''}>${m.name}</option>`; });
-            let pO = '<option value="">(当前)</option>';
-            presets.forEach(p => { pO += `<option value="${p.value}" ${p.value === c.preset ? 'selected' : ''}>${p.name}</option>`; });
+            let pO = '<option value="">(当前预设)</option>';
+            presetOptions.forEach(p => { pO += `<option value="${p.value}" ${p.value === c.preset ? 'selected' : ''}>${p.name}</option>`; });
             const gs = getGreetings();
             let gO = '<option value="-2">(左侧选择)</option>';
             gs.forEach(g => { gO += `<option value="${g.index}" ${g.index === c.greetingIdx ? 'selected' : ''}>${g.label}</option>`; });
@@ -431,25 +512,7 @@ jQuery(async () => {
         };
     }
 
-    // ===== 格式化回复（含思考链） =====
-    function formatReply(result) {
-        let html = '';
-
-        if (result.thinking) {
-            html += `<details style="margin-bottom:8px;border:1px solid #333;border-radius:6px;overflow:hidden;">
-                <summary style="padding:6px 10px;background:#1a1a3e;cursor:pointer;font-size:11px;color:#9980fa;">💭 思考过程（点击展开）</summary>
-                <div style="padding:8px 10px;font-size:11px;color:#888;background:#12122a;white-space:pre-wrap;max-height:300px;overflow-y:auto;line-height:1.6;">${escapeHtml(result.thinking)}</div>
-            </details>`;
-        }
-
-        html += `<div style="white-space:pre-wrap;line-height:1.7;">${escapeHtml(result.content)}</div>`;
-        return html;
-    }
-
-    function escapeHtml(text) {
-        return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
+    // ===== 主界面 =====
     mainEl.innerHTML = `
         <div class="ct-topbar"><h1>🧪 角色卡测试台</h1><div class="ct-topbar-right"><span class="ct-status" id="ct-st">就绪</span><button class="ct-close-btn" id="ct-x">✕</button></div></div>
         <div class="ct-body">
@@ -502,10 +565,24 @@ jQuery(async () => {
 
         state.testing = true;
         const btn = document.getElementById('ct-go');
-        btn.disabled = true; btn.textContent = '⏳ 测试中...';
+        btn.disabled = true; btn.textContent = '⏳ 加载预设中...';
         const res = document.getElementById('ct-res');
         res.innerHTML = '';
         document.getElementById('ct-exp').style.display = 'none';
+
+        // 预加载所有需要的预设
+        const neededPresets = new Set();
+        state.combos.forEach(c => { if (c.preset) neededPresets.add(c.preset); });
+
+        // 当前预设已经缓存了，只需加载其他的
+        for (const pv of neededPresets) {
+            if (!presetDataCache[pv]) {
+                btn.textContent = '⏳ 加载预设: ' + (presetOptions.find(p => p.value === pv)?.name || pv);
+                await loadPresetData(pv);
+            }
+        }
+
+        btn.textContent = '⏳ 测试中...';
 
         const allTasks = [];
         const allResults = [];
@@ -521,7 +598,7 @@ jQuery(async () => {
             const grid = sec.querySelector('.ct-result-grid');
 
             combos.forEach(co => {
-                const pN = co.preset ? presets.find(p => p.value === co.preset)?.name || co.preset : '当前';
+                const pN = co.preset ? presetOptions.find(p => p.value === co.preset)?.name || co.preset : '当前';
                 const mN = co.model || models[0]?.name || '当前';
                 const card = document.createElement('div');
                 card.className = 'ct-result-card';
@@ -534,6 +611,7 @@ jQuery(async () => {
 
         let total = allTasks.length, done = 0;
 
+        // 全部并行
         const promises = allTasks.map(async (task) => {
             const { scenario, combo, cardId } = task;
             const card = document.getElementById(cardId);
@@ -542,18 +620,24 @@ jQuery(async () => {
             const t0 = Date.now();
 
             try {
-                const pData = presets.find(p => p.value === combo.preset)?.data || null;
+                // 获取预设数据
+                const presetValue = combo.preset || document.getElementById('settings_preset_openai')?.value;
+                const presetData = presetDataCache[presetValue] || null;
                 const model = combo.model || models[0]?.value || 'gpt-4o';
 
-                const initMsgs = buildMessages(combo, [scenario.messages[0]]);
-                let result = await callAPI(model, initMsgs, pData);
+                // 构建第一轮消息
+                const initMsgs = buildMessages(presetData, combo);
+                initMsgs.push({ role: 'user', content: scenario.messages[0] });
+
+                let result = await callAPI(model, initMsgs, presetData);
                 let replies = [{ user: scenario.messages[0], ...result }];
 
+                // 多轮
                 if (scenario.messages.length > 1) {
                     let conv = [...initMsgs, { role: 'assistant', content: result.content }];
                     for (let i = 1; i < scenario.messages.length; i++) {
                         conv.push({ role: 'user', content: scenario.messages[i] });
-                        result = await callAPI(model, conv, pData);
+                        result = await callAPI(model, conv, presetData);
                         conv.push({ role: 'assistant', content: result.content });
                         replies.push({ user: scenario.messages[i], ...result });
                     }
@@ -597,7 +681,7 @@ jQuery(async () => {
                 t += `[${r.scenario}] 组合${r.combo} | ${r.model} | ${r.preset}\n`;
                 r.replies.forEach(rp => {
                     t += `👤 ${rp.user}\n`;
-                    if (rp.thinking) t += `💭 思考: ${rp.thinking}\n`;
+                    if (rp.thinking) t += `💭 ${rp.thinking}\n`;
                     t += `🤖 ${rp.content}\n\n`;
                 });
                 t += '---\n\n';
